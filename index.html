@@ -215,6 +215,10 @@ tbody tr:last-child td{border-bottom:none}
 .flags .ttl{font-weight:600}
 .flags .dt{color:var(--text-secondary);font-size:12.5px}
 
+.ai-panel-row td{padding:0 !important;border:none !important}
+.ai-panel{border-left:3px solid var(--series-1);background:color-mix(in srgb,var(--series-1) 6%,transparent);
+  padding:14px 16px;margin:6px 0}
+
 .kv{display:flex;justify-content:space-between;gap:14px;padding:7px 0;border-bottom:1px solid var(--grid);font-size:13.5px}
 .kv:last-child{border-bottom:none}
 .kv .k{color:var(--text-secondary)}
@@ -309,6 +313,35 @@ footer code{background:var(--surface-2);padding:1px 5px;border-radius:4px;font-s
         발급: <a href="https://console.cloud.google.com/apis/library/youtube.googleapis.com" target="_blank" rel="noopener">Google Cloud Console</a> →
         프로젝트 생성 → <b>YouTube Data API v3</b> 사용 설정 → 사용자 인증 정보 → API 키. 무료 할당량 1일 10,000 유닛
         (채널 1개 정밀 분석 ≈ 3~5 유닛, 이름 검색 시 +100 유닛).
+      </div>
+    </div>
+  </details>
+</div>
+
+<!-- ── AI 훅 분석 설정(선택) ── -->
+<div class="card">
+  <details class="settings" id="claudeKeyBox">
+    <summary><span class="status-dot" id="claudeKeyDot" style="background:var(--warning)"></span> AI 훅 분석 설정 <span class="muted" id="claudeKeyState">— 미설정 (사용 안 함)</span></summary>
+    <div class="card-pad" style="padding-top:0">
+      <div class="row">
+        <div style="flex:3 1 320px">
+          <label class="fld" for="claudeKey">Anthropic(Claude) API 키</label>
+          <input type="password" id="claudeKey" placeholder="sk-ant-..." autocomplete="off" spellcheck="false">
+        </div>
+        <div style="flex:1 1 170px">
+          <label class="fld" for="claudeModel">분석 품질</label>
+          <select id="claudeModel"></select>
+        </div>
+        <div style="flex:0 0 auto;display:flex;align-items:flex-end;gap:8px">
+          <button id="saveClaudeKey">저장</button>
+          <button class="ghost" id="clearClaudeKey">삭제</button>
+        </div>
+      </div>
+      <div class="hint">
+        아래 영상 목록의 <b>훅 분석</b> 버튼을 누르면 그 영상의 제목·설명·썸네일이 분석 시점에 Anthropic API로
+        전송됩니다 — YouTube 키와 달리 이 키를 넣으면 <b>외부 서비스로 데이터가 나갑니다</b>. 키는 이 브라우저의
+        <code>localStorage</code>에만 저장됩니다. 발급: <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">Anthropic Console</a>.
+        호출마다 소액 과금되며, 설정하지 않아도 나머지 모든 기능은 그대로 사용할 수 있습니다.
       </div>
     </div>
   </details>
@@ -412,6 +445,8 @@ footer code{background:var(--surface-2);padding:1px 5px;border-radius:4px;font-s
    ═══════════════════════════════════════════════════════════ */
 const API = "https://www.googleapis.com/youtube/v3/";
 const LS_KEY = "yt_certify_api_key";
+const LS_KEY_CLAUDE = "yt_certify_claude_key";
+const LS_KEY_CLAUDE_MODEL = "yt_certify_claude_model";
 const LS_THEME = "yt_certify_theme";
 
 /* 카테고리별 롱폼 RPM(USD, 1000 조회당 실수령 기준 업계 통용 범위) */
@@ -560,6 +595,170 @@ async function ytGet(endpoint, params, cost){
     throw new Error(msg);
   }
   return body;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   1-b. AI 훅 분석 (선택 기능 · Anthropic API 브라우저 직접 호출)
+   ═══════════════════════════════════════════════════════════ */
+let CLAUDE_KEY = "";
+let CLAUDE_MODEL = "claude-haiku-4-5-20251001";
+const CLAUDE_MODELS = [
+  ["claude-haiku-4-5-20251001", "빠르고 저렴 (추천)"],
+  ["claude-sonnet-5",           "더 정교한 해석"]
+];
+const AI_HOOK = new Map();      /* videoId -> {status, data|error} */
+const HOOK_HOT_RATIO = 1.8;     /* 채널 중앙값의 몇 배부터 "터진 영상"으로 볼지 */
+
+async function callClaude(prompt, imageUrl){
+  const content = [{type:"text", text: prompt}];
+  if(imageUrl) content.push({type:"image", source:{type:"url", url: imageUrl}});
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method:"POST",
+    headers:{
+      "content-type":"application/json",
+      "x-api-key": CLAUDE_KEY,
+      "anthropic-version":"2023-06-01",
+      "anthropic-dangerous-direct-browser-access":"true"
+    },
+    body: JSON.stringify({ model: CLAUDE_MODEL, max_tokens: 900, messages:[{role:"user", content}] })
+  });
+  const body = await res.json().catch(()=>({}));
+  if(!res.ok){
+    const msg = body?.error?.message || `HTTP ${res.status}`;
+    if(res.status === 401) throw new Error("Claude API 키가 유효하지 않습니다.");
+    if(res.status === 429) throw new Error("요청이 많거나 크레딧이 부족합니다: " + msg);
+    throw new Error(msg);
+  }
+  const text = (body.content || []).filter(b => b.type === "text").map(b => b.text).join("\n").trim();
+  if(!text) throw new Error("응답이 비어 있습니다.");
+  return text;
+}
+
+function parseHookJSON(text){
+  const m = text.match(/\{[\s\S]*\}/);
+  if(!m) return null;
+  try{ return JSON.parse(m[0]); }catch{ return null; }
+}
+
+async function analyzeHook(r, v){
+  const others = r.vids.filter(x => x.id !== v.id).slice(0,6)
+    .map(x => `- ${x.title} (조회수 ${fmtN(x.views)}${x.isShort?", 숏츠":""})`).join("\n") || "(비교할 다른 영상 없음)";
+  const ratio = r.medViews > 0 ? v.views / r.medViews : null;
+  const prompt = `너는 유튜브 콘텐츠 전략을 분석하는 애널리스트다. 아래 영상 하나가 같은 채널의 다른 영상보다
+조회수가 왜 더 잘 나왔는지, 어떤 "훅"(제목·썸네일·기획 포인트)이 작용했을지 분석해줘.
+공개된 메타데이터만으로 하는 추정이니 단정하지 말고 근거 있는 가설로 서술해. 한국어로 답해.
+
+[채널]
+이름: ${r.title}
+주제: ${r.rev.rpmLabel}
+구독자: ${r.subs ?? "비공개"}
+최근 영상 조회수 중앙값: ${fmtN(r.medViews)}
+
+[분석 대상 영상]
+제목: ${v.title}
+게시일: ${fmtDate(v.published)}
+길이: ${v.isShort ? "숏츠" : fmtDur(v.dur)}
+조회수: ${fmtN(v.views)}${ratio ? ` (채널 중앙값 대비 ${ratio.toFixed(1)}배)` : ""}
+좋아요: ${v.likesHidden ? "비공개" : fmtN(v.likes)} / 댓글: ${v.commentsOff ? "비공개" : fmtN(v.comments)}
+설명(일부): ${(v.desc || "(없음)").slice(0,400)}
+태그: ${(v.tags || []).slice(0,15).join(", ") || "(없음)"}
+
+[같은 채널의 다른 최근 영상 — 비교용]
+${others}
+
+아래 JSON 형식으로만 답해. 다른 텍스트는 절대 붙이지 마:
+{
+  "summary": "한두 문장 핵심 요약",
+  "titleHook": "제목이 어떤 심리적 훅을 썼는지",
+  "thumbnailHook": "썸네일 이미지에서 보이는 훅 포인트(이미지가 없으면 null)",
+  "factors": ["조회수 상승에 기여했을 구조적 요인 2~4개"],
+  "tips": ["다음 영상에 재현해볼 만한 포인트 2~3개"]
+}`;
+  const text = await callClaude(prompt, v.thumb || null);
+  const json = parseHookJSON(text);
+  return json || {summary:text, titleHook:null, thumbnailHook:null, factors:[], tips:[]};
+}
+
+function aiHookPanelHTML(state){
+  if(state.status === "loading") return `<div class="hint">🤖 분석 중… (Anthropic API 호출)</div>`;
+  if(state.status === "error")
+    return `<div class="err">${esc(state.error)}
+      <button class="ghost sm" data-ai-retry style="margin-left:8px">다시 시도</button></div>`;
+  const d = state.data;
+  const factors = (d.factors || []).map(t => `<li><span class="ico" style="background:var(--series-1)">·</span><span>${esc(t)}</span></li>`).join("");
+  const tips    = (d.tips    || []).map(t => `<li><span class="ico" style="background:var(--good)">✓</span><span>${esc(t)}</span></li>`).join("");
+  return `
+    <div class="kv"><span class="k">요약</span><span class="v" style="font-weight:400;text-align:right;max-width:72%">${esc(d.summary||"—")}</span></div>
+    <div class="kv"><span class="k">제목 훅</span><span class="v" style="font-weight:400;text-align:right;max-width:72%">${esc(d.titleHook||"—")}</span></div>
+    ${d.thumbnailHook ? `<div class="kv"><span class="k">썸네일 훅</span><span class="v" style="font-weight:400;text-align:right;max-width:72%">${esc(d.thumbnailHook)}</span></div>` : ""}
+    ${factors ? `<p class="sec-title" style="margin:14px 0 10px">기여 요인 (추정)</p><ul class="flags">${factors}</ul>` : ""}
+    ${tips ? `<p class="sec-title" style="margin:14px 0 10px">재현 포인트</p><ul class="flags">${tips}</ul>` : ""}
+    <div class="hint" style="margin-top:12px">AI의 추정입니다 — 공개 메타데이터만으로 유추한 가설이며 실제 알고리즘 동작과 다를 수 있습니다.</div>`;
+}
+
+function wireVideoAI(){
+  if(wireVideoAI._done) return;
+  wireVideoAI._done = true;
+  $("#details").addEventListener("click", async ev => {
+    const retryBtn = ev.target.closest("[data-ai-retry]");
+    const openBtn = ev.target.closest("[data-ai-btn]");
+    if(!retryBtn && !openBtn) return;
+
+    let panel, targetId;
+    if(openBtn){
+      const dataRow = openBtn.closest("tr");
+      targetId = openBtn.dataset.aiBtn;
+      const next = dataRow.nextElementSibling;
+      if(next && next.classList.contains("ai-panel-row") && next.dataset.for === targetId){
+        next.classList.toggle("hidden");
+        return;
+      }
+      panel = document.createElement("tr");
+      panel.className = "ai-panel-row";
+      panel.dataset.for = targetId;
+      panel.innerHTML = `<td colspan="8"><div class="ai-panel"></div></td>`;
+      dataRow.after(panel);
+    }else{
+      panel = retryBtn.closest(".ai-panel-row");
+      targetId = panel.dataset.for;
+    }
+
+    const chId = panel.closest("[data-ch-id]")?.dataset.chId;
+    const r = RESULTS.find(x => x.id === chId);
+    const v = r?.vids.find(x => x.id === targetId);
+    if(!r || !v) return;
+
+    if(!CLAUDE_KEY){
+      showErrors(["AI 훅 분석을 쓰려면 먼저 상단 'AI 훅 분석 설정'에 Anthropic API 키를 저장하세요."]);
+      $("#claudeKeyBox").open = true;
+      $("#claudeKeyBox").scrollIntoView({behavior:"smooth", block:"start"});
+      $("#claudeKey").focus();
+      if(openBtn) panel.remove();     /* 키 없으면 빈 패널을 남기지 않음 */
+      return;
+    }
+
+    panel.classList.remove("hidden");
+    const box = panel.querySelector(".ai-panel");
+
+    const cached = AI_HOOK.get(targetId);
+    if(cached && cached.status === "done" && !retryBtn){
+      box.innerHTML = aiHookPanelHTML(cached);
+      return;
+    }
+
+    AI_HOOK.set(targetId, {status:"loading"});
+    box.innerHTML = aiHookPanelHTML({status:"loading"});
+    try{
+      const data = await analyzeHook(r, v);
+      const state = {status:"done", data};
+      AI_HOOK.set(targetId, state);
+      box.innerHTML = aiHookPanelHTML(state);
+    }catch(e){
+      const state = {status:"error", error:e.message};
+      AI_HOOK.set(targetId, state);
+      box.innerHTML = aiHookPanelHTML(state);
+    }
+  });
 }
 
 /* 입력 문자열 → 채널 ID */
@@ -765,6 +964,9 @@ function normalizeVideo(v){
     title: v.snippet?.title || "(제목 없음)",
     published: new Date(v.snippet?.publishedAt || Date.now()).getTime(),
     categoryId: v.snippet?.categoryId || "",
+    thumb: v.snippet?.thumbnails?.medium?.url || v.snippet?.thumbnails?.high?.url || v.snippet?.thumbnails?.default?.url || "",
+    desc: v.snippet?.description || "",
+    tags: v.snippet?.tags || [],
     views: st.viewCount != null ? +st.viewCount : null,
     likes: st.likeCount != null ? +st.likeCount : null,
     comments: st.commentCount != null ? +st.commentCount : null,
@@ -1179,8 +1381,12 @@ function flagsHTML(r){
 }
 
 function videoTableHTML(r){
-  const rows = r.vids.slice(0,25).map(v => `<tr>
+  const rows = r.vids.slice(0,25).map(v => {
+    const ratio = r.medViews > 0 ? v.views / r.medViews : null;
+    const hot = ratio != null && ratio >= HOOK_HOT_RATIO;
+    return `<tr>
     <td class="l" style="max-width:340px;overflow:hidden;text-overflow:ellipsis">
+      ${hot?`<span class="badge b-good" style="margin-right:6px" title="채널 조회수 중앙값 대비 ${ratio.toFixed(1)}배">🔥 ${ratio.toFixed(1)}x</span>`:""}
       <a href="https://www.youtube.com/watch?v=${esc(v.id)}" target="_blank" rel="noopener">${esc(v.title)}</a></td>
     <td class="num">${fmtDate(v.published)}</td>
     <td class="num">${v.isShort?`<span class="badge b-neutral" style="border-color:var(--series-2);color:var(--series-2)">숏츠</span>`:fmtDur(v.dur)}</td>
@@ -1188,18 +1394,20 @@ function videoTableHTML(r){
     <td class="num">${v.likesHidden?"—":fmtN(v.likes)}</td>
     <td class="num">${v.commentsOff?"—":fmtN(v.comments)}</td>
     <td class="num">${v.views&&!v.likesHidden?pct((v.likes+(v.comments||0))/v.views,2):"—"}</td>
-  </tr>`).join("");
+    <td class="num"><button class="ghost sm" data-ai-btn="${esc(v.id)}">${hot?"🔥 훅 분석":"훅 분석"}</button></td>
+  </tr>`;
+  }).join("");
   return `<details class="settings">
-    <summary>영상별 원본 데이터 보기 (최근 ${Math.min(25, r.vids.length)}개)</summary>
+    <summary>영상별 원본 데이터 보기 (최근 ${Math.min(25, r.vids.length)}개) · 🔥 = 채널 중앙값 대비 ${HOOK_HOT_RATIO}배 이상 터진 영상</summary>
     <div class="tbl-scroll"><table>
-      <thead><tr><th class="l">제목</th><th>게시일</th><th>길이</th><th>조회수</th><th>좋아요</th><th>댓글</th><th>참여율</th></tr></thead>
+      <thead><tr><th class="l">제목</th><th>게시일</th><th>길이</th><th>조회수</th><th>좋아요</th><th>댓글</th><th>참여율</th><th>AI 분석</th></tr></thead>
       <tbody>${rows}</tbody></table></div>
   </details>`;
 }
 
 function renderDetails(){
   $("#details").innerHTML = RESULTS.map(r => `
-    <div class="card" id="ch-${esc(r.id)}" style="margin-top:18px">
+    <div class="card" id="ch-${esc(r.id)}" data-ch-id="${esc(r.id)}" style="margin-top:18px">
       <div class="chan-head">
         ${r.thumb?`<img src="${esc(r.thumb)}" alt="">`:`<div style="width:56px;height:56px;border-radius:50%;background:var(--surface-2)"></div>`}
         <div style="min-width:0;flex:1">
@@ -1226,6 +1434,7 @@ function renderDetails(){
     </div>`).join("");
 
   wireCharts();
+  wireVideoAI();
   $("#methodCard").classList.remove("hidden");
   renderMethod();
 }
@@ -1676,6 +1885,11 @@ function setKeyState(){
   $("#keyDot").style.background = has ? "var(--good)" : "var(--warning)";
   $("#keyState").textContent = has ? "— 저장됨 (실데이터 분석 가능)" : "— 미설정 (데모 모드)";
 }
+function setClaudeKeyState(){
+  const has = !!CLAUDE_KEY;
+  $("#claudeKeyDot").style.background = has ? "var(--good)" : "var(--warning)";
+  $("#claudeKeyState").textContent = has ? "— 저장됨 (훅 분석 가능)" : "— 미설정 (사용 안 함)";
+}
 function init(){
   /* 국가 선택 */
   $("#optCountry").innerHTML = Object.entries(COUNTRIES)
@@ -1707,6 +1921,28 @@ function init(){
   $("#clearKey").onclick = () => {
     API_KEY = ""; $("#apiKey").value = ""; localStorage.removeItem(LS_KEY); setKeyState();
     loadDiscovery();
+  };
+
+  /* AI 훅 분석 키 */
+  $("#claudeModel").innerHTML = CLAUDE_MODELS
+    .map(([k,label]) => `<option value="${k}">${label}</option>`).join("");
+  CLAUDE_MODEL = localStorage.getItem(LS_KEY_CLAUDE_MODEL) || CLAUDE_MODEL;
+  $("#claudeModel").value = CLAUDE_MODEL;
+  CLAUDE_KEY = localStorage.getItem(LS_KEY_CLAUDE) || "";
+  if(CLAUDE_KEY){ $("#claudeKey").value = CLAUDE_KEY; }
+  setClaudeKeyState();
+  $("#claudeModel").onchange = () => {
+    CLAUDE_MODEL = $("#claudeModel").value;
+    localStorage.setItem(LS_KEY_CLAUDE_MODEL, CLAUDE_MODEL);
+  };
+  $("#saveClaudeKey").onclick = () => {
+    CLAUDE_KEY = $("#claudeKey").value.trim();
+    if(CLAUDE_KEY) localStorage.setItem(LS_KEY_CLAUDE, CLAUDE_KEY); else localStorage.removeItem(LS_KEY_CLAUDE);
+    setClaudeKeyState();
+    if(CLAUDE_KEY) $("#claudeKeyBox").open = false;
+  };
+  $("#clearClaudeKey").onclick = () => {
+    CLAUDE_KEY = ""; $("#claudeKey").value = ""; localStorage.removeItem(LS_KEY_CLAUDE); setClaudeKeyState();
   };
 
   /* 자동 탐색 */
