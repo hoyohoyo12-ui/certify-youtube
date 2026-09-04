@@ -704,6 +704,20 @@ function wireVideoAI(){
   if(wireVideoAI._done) return;
   wireVideoAI._done = true;
   $("#details").addEventListener("click", async ev => {
+    const sortTh = ev.target.closest("[data-vsort]");
+    if(sortTh){
+      const detailsEl = sortTh.closest("details[data-ch-id]");
+      const chId = detailsEl.dataset.chId;
+      const r = RESULTS.find(x => x.id === chId);
+      if(!r) return;
+      const key = sortTh.dataset.vsort;
+      const cur = VID_SORT.get(chId) || VID_SORT_DEFAULT;
+      VID_SORT.set(chId, cur.key === key ? {key, dir:-cur.dir} : {key, dir:-1});
+      detailsEl.outerHTML = videoTableHTML(r);
+      $(`#vidtbl-${CSS.escape(chId)}`).open = true;
+      return;
+    }
+
     const retryBtn = ev.target.closest("[data-ai-retry]");
     const openBtn = ev.target.closest("[data-ai-btn]");
     if(!retryBtn && !openBtn) return;
@@ -1384,8 +1398,22 @@ function flagsHTML(r){
   </ul>`;
 }
 
+/* 영상 표 정렬 — 채널별로 별도 상태 유지, 재수집 없이 이미 받아온 표본(최근 25개) 안에서만 재배열 */
+const VID_SORT = new Map();     /* channelId -> {key, dir} */
+const VID_SORT_DEFAULT = {key:"published", dir:-1};
+const VID_SORT_COLS = {
+  published: {label:"게시일", get:v => v.published},
+  views:     {label:"조회수", get:v => v.views ?? -1},
+  likes:     {label:"좋아요", get:v => v.likesHidden ? -1 : v.likes},
+  comments:  {label:"댓글",   get:v => v.commentsOff ? -1 : v.comments},
+  eng:       {label:"참여율", get:v => (v.views && !v.likesHidden) ? (v.likes+(v.comments||0))/v.views : -1}
+};
+
 function videoTableHTML(r){
-  const rows = r.vids.slice(0,25).map(v => {
+  const vs = VID_SORT.get(r.id) || VID_SORT_DEFAULT;
+  const pool = r.vids.slice(0,25);          /* 표시 대상은 항상 "최근 25개" — 정렬은 이 안에서만 재배열 */
+  const rows = [...pool].sort((a,b) => (VID_SORT_COLS[vs.key].get(a) - VID_SORT_COLS[vs.key].get(b)) * vs.dir)
+    .map(v => {
     const ratio = r.medViews > 0 ? v.views / r.medViews : null;
     const hot = ratio != null && ratio >= HOOK_HOT_RATIO;
     return `<tr>
@@ -1401,10 +1429,15 @@ function videoTableHTML(r){
     <td class="num"><button class="ghost sm" data-ai-btn="${esc(v.id)}">${hot?"🔥 훅 분석":"훅 분석"}</button></td>
   </tr>`;
   }).join("");
-  return `<details class="settings">
+  const th = key => {
+    const active = vs.key === key;
+    const arrow = active ? (vs.dir < 0 ? " ↓" : " ↑") : "";
+    return `<th class="sortable" data-vsort="${key}">${VID_SORT_COLS[key].label}${arrow}</th>`;
+  };
+  return `<details class="settings" id="vidtbl-${esc(r.id)}" data-ch-id="${esc(r.id)}">
     <summary>영상별 원본 데이터 보기 (최근 ${Math.min(25, r.vids.length)}개) · 🔥 = 채널 중앙값 대비 ${HOOK_HOT_RATIO}배 이상 터진 영상</summary>
     <div class="tbl-scroll"><table>
-      <thead><tr><th class="l">제목</th><th>게시일</th><th>길이</th><th>조회수</th><th>좋아요</th><th>댓글</th><th>참여율</th><th>AI 분석</th></tr></thead>
+      <thead><tr><th class="l">제목</th>${th("published")}<th>길이</th>${th("views")}${th("likes")}${th("comments")}${th("eng")}<th>AI 분석</th></tr></thead>
       <tbody>${rows}</tbody></table></div>
   </details>`;
 }
