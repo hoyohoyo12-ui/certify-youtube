@@ -637,7 +637,11 @@ async function callClaude(prompt, imageUrl){
 function parseHookJSON(text){
   const m = text.match(/\{[\s\S]*\}/);
   if(!m) return null;
-  try{ return JSON.parse(m[0]); }catch{ return null; }
+  let j;
+  try{ j = JSON.parse(m[0]); }catch{ return null; }
+  /* summary가 비었거나 공백뿐이면 JSON 형식은 맞아도 쓸모없는 결과 — 실패로 취급해 원문 폴백으로 보낸다 */
+  if(!j || typeof j.summary !== "string" || !j.summary.trim()) return null;
+  return j;
 }
 
 async function analyzeHook(r, v){
