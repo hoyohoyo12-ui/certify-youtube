@@ -219,6 +219,18 @@ tbody tr:last-child td{border-bottom:none}
 .ai-panel{border-left:3px solid var(--series-1);background:color-mix(in srgb,var(--series-1) 6%,transparent);
   padding:14px 16px;margin:6px 0}
 
+.catmenu{position:relative}
+.catmenu > summary{list-style:none;cursor:pointer;font-size:12px;font-weight:600;padding:4px 10px;border-radius:8px;
+  border:1px solid var(--border-strong);color:var(--text-secondary);white-space:nowrap;user-select:none}
+.catmenu > summary::-webkit-details-marker{display:none}
+.catmenu[open] > summary{color:var(--text-primary);border-color:var(--text-primary)}
+.catmenu-pop{position:absolute;right:0;top:calc(100% + 6px);z-index:20;width:240px;max-width:calc(100vw - 40px);
+  background:var(--surface-1);border:1px solid var(--border-strong);border-radius:10px;box-shadow:var(--shadow);
+  padding:10px;display:flex;flex-direction:column;gap:6px;text-align:left}
+.catmenu-pop label{display:flex;align-items:center;gap:7px;font-size:13px;cursor:pointer;padding:2px 0}
+.catmenu-new{display:flex;gap:6px;margin-top:4px;padding-top:8px;border-top:1px solid var(--grid)}
+.catmenu-new input{flex:1;min-width:0;font-size:12.5px;padding:5px 8px}
+
 .kv{display:flex;justify-content:space-between;gap:14px;padding:7px 0;border-bottom:1px solid var(--grid);font-size:13.5px}
 .kv:last-child{border-bottom:none}
 .kv .k{color:var(--text-secondary)}
@@ -359,6 +371,10 @@ footer code{background:var(--surface-2);padding:1px 5px;border-radius:4px;font-s
     <select id="dscCat" style="width:auto;min-width:150px;font-size:13px;padding:6px 9px"></select>
     <select id="dscSort" style="width:auto;min-width:150px;font-size:13px;padding:6px 9px"
             title="이미 불러온 채널을 다시 정렬합니다 — API 할당량을 쓰지 않습니다"></select>
+    <span id="dscCatTools" class="hidden" style="display:flex;gap:6px">
+      <button class="ghost sm" id="dscCatRename">✎ 이름 변경</button>
+      <button class="ghost sm" id="dscCatDelete">🗑 카테고리 삭제</button>
+    </span>
     <button class="ghost sm" id="dscReload">↻ 새로고침</button>
   </div>
   <div id="dscBody"><div class="pv-grid" id="dscGrid"></div></div>
@@ -448,6 +464,7 @@ const LS_KEY = "yt_certify_api_key";
 const LS_KEY_CLAUDE = "yt_certify_claude_key";
 const LS_KEY_CLAUDE_MODEL = "yt_certify_claude_model";
 const LS_THEME = "yt_certify_theme";
+const LS_MY_CATS = "yt_certify_my_cats";
 
 /* 카테고리별 롱폼 RPM(USD, 1000 조회당 실수령 기준 업계 통용 범위) */
 const RPM = {
@@ -1456,6 +1473,7 @@ function renderDetails(){
           ${badge(r.grade.lvl, `신뢰도 ${r.score}`)}
           ${r.ypp.eligible?badge("good","수익화 충족"):r.ypp.near?badge("warning","수익화 근접"):badge("critical","수익화 미달")}
           <a href="https://www.youtube.com/channel/${esc(r.id)}" target="_blank" rel="noopener" style="font-size:12px">채널 열기 ↗</a>
+          <details class="catmenu" data-ch-id="${esc(r.id)}">${catMenuHTML(r.id)}</details>
         </div>
       </div>
       ${tilesHTML(r)}
@@ -1472,6 +1490,7 @@ function renderDetails(){
 
   wireCharts();
   wireVideoAI();
+  refreshSavedSnapshots();
   $("#methodCard").classList.remove("hidden");
   renderMethod();
 }
@@ -1563,6 +1582,146 @@ function applyDscSort(){
   DISCOVERED.sort((a,b) => f(b) - f(a));
 }
 
+/* ── 내 카테고리: 분석한 채널을 직접 만든 목록에 저장 (이 브라우저 localStorage) ── */
+let MY_CATS = [];          /* [{id, name, channels:[snapshot]}] */
+let DSC_MY = null;         /* 탐색 영역에 띄운 내 카테고리 id — null이면 YouTube 차트 모드 */
+let DSC_LOAD_SEQ = 0;      /* 늦게 끝난 차트 요청이 카테고리 화면을 덮어쓰지 않게 */
+
+function loadMyCats(){
+  try{ MY_CATS = JSON.parse(localStorage.getItem(LS_MY_CATS) || "[]"); }catch{ MY_CATS = []; }
+  if(!Array.isArray(MY_CATS)) MY_CATS = [];
+}
+function saveMyCats(){
+  try{ localStorage.setItem(LS_MY_CATS, JSON.stringify(MY_CATS)); }
+  catch{ showErrors(["카테고리를 저장하지 못했습니다. 브라우저 저장공간이 차단되어 있는지 확인하세요."]); }
+}
+const catsOf = chId => MY_CATS.filter(c => c.channels.some(x => x.id === chId));
+
+/* 카드에 띄울 값만 저장 — 다시 볼 때 API를 부르지 않아도 되게 */
+function channelSnapshot(r){
+  return {
+    id:r.id, title:r.title, handle:r.handle, thumb:r.thumb, subs:r.subs,
+    medViews:r.medViews, engagement:r.engagement,
+    wonLow:r.rev.wonLow, wonHigh:r.rev.wonHigh, rpmLabel:r.rev.rpmLabel,
+    score:r.score, gradeLvl:r.grade.lvl, gradeLabel:r.grade.label,
+    ypp: r.ypp.eligible ? "ok" : r.ypp.near ? "near" : "no",
+    demo: r.id.startsWith("UCdemo"), savedAt: Date.now()
+  };
+}
+/* 저장해 둔 채널을 다시 분석하면 최신 결과로 갱신 */
+function refreshSavedSnapshots(){
+  let changed = false;
+  for(const r of RESULTS) for(const c of MY_CATS){
+    const i = c.channels.findIndex(x => x.id === r.id);
+    if(i >= 0){ c.channels[i] = channelSnapshot(r); changed = true; }
+  }
+  if(!changed) return;
+  saveMyCats();
+  if(DSC_MY) loadMyCategory(DSC_MY);
+}
+
+function catMenuHTML(chId){
+  const mine = catsOf(chId);
+  const list = MY_CATS.length
+    ? MY_CATS.map(c => `<label><input type="checkbox" data-cat-toggle="${esc(c.id)}"${mine.includes(c)?" checked":""}>
+        <span style="flex:1">${esc(c.name)}</span><span class="muted">${c.channels.length}</span></label>`).join("")
+    : `<div class="hint" style="margin:0">아직 만든 카테고리가 없습니다. 이름을 입력해 새로 만드세요.</div>`;
+  return `<summary>⭐ ${mine.length ? `카테고리 ${mine.length}개` : "카테고리에 추가"}</summary>
+    <div class="catmenu-pop">${list}
+      <div class="catmenu-new">
+        <input type="text" data-cat-newname placeholder="새 카테고리 이름" maxlength="30">
+        <button class="sm" data-cat-new>만들기</button>
+      </div>
+    </div>`;
+}
+function refreshCatMenus(){
+  $$("details.catmenu").forEach(m => { const open = m.open; m.innerHTML = catMenuHTML(m.dataset.chId); m.open = open; });
+}
+function renderCatOptions(){
+  const sel = $("#dscCat"), cur = sel.value;
+  sel.innerHTML = DISCOVER_CATS.map(([k,v]) => `<option value="${k}">${v}</option>`).join("")
+    + (MY_CATS.length ? `<optgroup label="⭐ 내 카테고리">${MY_CATS.map(c =>
+        `<option value="my:${esc(c.id)}">⭐ ${esc(c.name)} (${c.channels.length})</option>`).join("")}</optgroup>` : "");
+  sel.value = [...sel.options].some(o => o.value === cur) ? cur : "";
+}
+/* 카테고리가 바뀐 뒤 드롭다운·메뉴·탐색 화면을 한 번에 맞춤 */
+function catsChanged(){
+  saveMyCats();
+  renderCatOptions();
+  refreshCatMenus();
+  if(!DSC_MY) return;
+  if(MY_CATS.some(c => c.id === DSC_MY)) loadMyCategory(DSC_MY);
+  else { $("#dscCat").value = ""; loadDiscovery(); }
+}
+function setChannelInCat(catId, chId, on){
+  const c = MY_CATS.find(x => x.id === catId);
+  if(!c) return;
+  const i = c.channels.findIndex(x => x.id === chId);
+  const r = RESULTS.find(x => x.id === chId);
+  if(on && i < 0 && r) c.channels.push(channelSnapshot(r));
+  if(!on && i >= 0) c.channels.splice(i, 1);
+  catsChanged();
+}
+function createCat(name, chId){
+  name = (name || "").trim().slice(0,30);
+  if(!name) return;
+  let c = MY_CATS.find(x => x.name === name);          /* 같은 이름이면 새로 만들지 않고 거기에 추가 */
+  if(!c){ c = {id:"c" + Date.now().toString(36), name, channels:[]}; MY_CATS.push(c); }
+  const r = RESULTS.find(x => x.id === chId);
+  if(r && !c.channels.some(x => x.id === chId)) c.channels.push(channelSnapshot(r));
+  catsChanged();
+}
+
+function loadMyCategory(id){
+  const c = MY_CATS.find(x => x.id === id);
+  DSC_MY = id;
+  DSC_LOAD_SEQ++;                                        /* 진행 중이던 차트 요청 결과는 버림 */
+  const chs = c ? c.channels : [];
+  DSC_DEMO = chs.length > 0 && chs.every(x => x.demo);
+  DISCOVERED = chs.map(x => ({
+    id:x.id, title:x.title, saved:x,
+    meta:{snippet:{title:x.title, customUrl:x.handle, thumbnails:{default:{url:x.thumb}}}},
+    stats:{trendViews:x.medViews, subs:x.subs, engagement:x.engagement,
+           rev:{wonLow:x.wonLow, wonHigh:x.wonHigh, wonMid:(x.wonLow + x.wonHigh)/2, rpmLabel:x.rpmLabel}}
+  }));
+  applyDscSort();
+  renderDiscovery();
+  syncDscMode();
+  $("#dscSub").textContent = c
+    ? `⭐ ${c.name} · 채널 ${chs.length}개 · 저장해 둔 분석 결과 기준 (API 사용 없음)`
+    : "카테고리를 찾을 수 없습니다";
+}
+function syncDscMode(){
+  const my = !!DSC_MY;
+  $("#dscRegions").classList.toggle("hidden", my);
+  $("#dscCatTools").classList.toggle("hidden", !my);
+  const opt = $("#dscSort").querySelector('option[value="trend"]');
+  if(opt) opt.textContent = my ? "영상 조회수순 (중앙값)" : "인기 영상 조회수순";
+}
+
+function wireCategoryMenus(){
+  document.addEventListener("change", ev => {
+    const cb = ev.target.closest("[data-cat-toggle]");
+    if(cb) setChannelInCat(cb.dataset.catToggle, cb.closest("details.catmenu").dataset.chId, cb.checked);
+  });
+  const submitNew = el => {
+    const menu = el.closest("details.catmenu");
+    createCat(menu.querySelector("[data-cat-newname]").value, menu.dataset.chId);
+    menu.querySelector("[data-cat-newname]")?.focus();
+  };
+  document.addEventListener("click", ev => {
+    const btn = ev.target.closest("[data-cat-new]");
+    if(btn){ submitNew(btn); return; }
+    $$("details.catmenu[open]").forEach(m => { if(!m.contains(ev.target)) m.open = false; });   /* 바깥 클릭 시 닫기 */
+  });
+  document.addEventListener("keydown", ev => {
+    if(ev.key !== "Enter" || !ev.target.matches?.("[data-cat-newname]")) return;
+    if(ev.isComposing || ev.keyCode === 229) return;       /* 한글 조합 중 Enter는 글자 확정용 */
+    ev.preventDefault();
+    submitNew(ev.target);
+  });
+}
+
 function renderDiscoverChips(){
   $("#dscRegions").innerHTML = Object.entries(DISCOVER_REGIONS).map(([k,v]) =>
     `<button class="chip" data-region="${k}" aria-pressed="${DSC_REGION===k}">${v.label}</button>`).join("");
@@ -1581,7 +1740,10 @@ function dscSkeleton(n=8){
 function renderDiscovery(){
   const grid = $("#dscGrid");
   if(!DISCOVERED.length){
-    grid.innerHTML = `<p class="muted" style="grid-column:1/-1;margin:0">
+    grid.innerHTML = DSC_MY
+      ? `<p class="muted" style="grid-column:1/-1;margin:0">
+      아직 이 카테고리에 채널이 없습니다. 채널을 분석한 뒤 채널 카드 오른쪽 위의 <b>⭐ 카테고리에 추가</b>를 누르세요.</p>`
+      : `<p class="muted" style="grid-column:1/-1;margin:0">
       이 지역·카테고리 조합의 인기 급상승 차트를 가져오지 못했습니다. 다른 카테고리를 선택해 보세요.</p>`;
     $("#dscSelBar").classList.add("hidden");
     return;
@@ -1590,7 +1752,8 @@ function renderDiscovery(){
     const s = e.stats;
     const thumb = e.meta?.snippet?.thumbnails?.default?.url || "";
     const handle = e.meta?.snippet?.customUrl || "";
-    const multi = s.regions.length > 1;
+    const saved = e.saved;                                /* 내 카테고리에서 온 카드면 저장본 */
+    const multi = !saved && s.regions.length > 1;
     return `<div class="pv ${SELECTED.has(e.id)?"sel":""}" data-id="${esc(e.id)}">
       <div class="pv-top">
         <span class="pv-rank">${i+1}</span>
@@ -1602,21 +1765,30 @@ function renderDiscovery(){
         </div>
       </div>
       <div class="pv-stats">
+        ${saved ? `
+        <div><b>${fmtK(s.trendViews)}</b><span>영상 조회수(중앙값)</span></div>
+        <div><b>${saved.score}</b><span>신뢰도</span></div>` : `
         <div><b>${fmtK(s.trendViews)}</b><span>인기 영상 조회수</span></div>
-        <div><b>${s.hits}</b><span>차트 진입 편수</span></div>
+        <div><b>${s.hits}</b><span>차트 진입 편수</span></div>`}
         <div><b>${pct(s.engagement,1)}</b><span>참여율</span></div>
         <div title="${esc(s.rev.rpmLabel)} RPM 기준 · ${fmtWon(s.rev.wonLow)} ~ ${fmtWon(s.rev.wonHigh)}"${DSC_SORT==="rev"?' style="background:var(--surface-1)"':''}>
           <b>${fmtWon(s.rev.wonMid)}</b><span>월 예상 수익</span></div>
       </div>
-      <div class="pv-tags">
+      <div class="pv-tags">${saved ? `
+        ${badge(saved.gradeLvl, saved.gradeLabel)}
+        ${saved.ypp==="ok" ? badge("good","수익화 충족") : saved.ypp==="near" ? badge("warning","수익화 근접") : badge("critical","수익화 미달")}
+        ${badge("neutral", `${fmtDate(saved.savedAt)} 분석 기준`)}` : `
         ${multi ? badge("good", `${s.regions.length}개국 동시 진입`) : ""}
         ${s.reach != null && s.reach >= 3 ? badge("good", `구독자 대비 ${s.reach.toFixed(1)}배 도달`) : ""}
         ${s.likeRate != null && s.likeRate < 0.005 ? badge("warning", "좋아요율 낮음") : ""}
-        ${s.shortsShare >= 0.6 ? badge("neutral", "숏츠 중심") : ""}
+        ${s.shortsShare >= 0.6 ? badge("neutral", "숏츠 중심") : ""}`}
       </div>
       <div class="pv-foot">
         <label><input type="checkbox" data-pick="${esc(e.id)}" ${SELECTED.has(e.id)?"checked":""}> 선택</label>
-        <button class="ghost sm" data-one="${esc(e.id)}">정밀 분석</button>
+        <span style="display:flex;gap:6px">
+          ${saved ? `<button class="ghost sm" data-cat-remove="${esc(e.id)}" title="이 카테고리에서 빼기">빼기</button>` : ""}
+          <button class="ghost sm" data-one="${esc(e.id)}">정밀 분석</button>
+        </span>
       </div>
     </div>`;
   }).join("");
@@ -1628,6 +1800,7 @@ function renderDiscovery(){
     updateSelBar();
   });
   $$("#dscGrid button[data-one]").forEach(b => b.onclick = () => analyzeIds([b.dataset.one]));
+  $$("#dscGrid button[data-cat-remove]").forEach(b => b.onclick = () => setChannelInCat(DSC_MY, b.dataset.catRemove, false));
   $("#dscSelBar").classList.remove("hidden");
   updateSelBar();
 }
@@ -1641,18 +1814,25 @@ function updateSelBar(){
 
 async function loadDiscovery(){
   SELECTED.clear();
+  const cat = $("#dscCat").value;
+  if(cat.startsWith("my:")){ loadMyCategory(cat.slice(3)); return; }
+  DSC_MY = null;
+  syncDscMode();
+  const seq = ++DSC_LOAD_SEQ;
   if(!API_KEY){ loadDemoDiscovery(); return; }
   DSC_DEMO = false;
   dscSkeleton();
   $("#dscSub").textContent = "인기 급상승 차트를 불러오는 중…";
   try{
-    const cat = $("#dscCat").value;
-    DISCOVERED = await discoverChannels(DSC_REGION, cat, (p,msg) => { $("#dscSub").textContent = msg; });
+    const found = await discoverChannels(DSC_REGION, cat, (p,msg) => { if(seq === DSC_LOAD_SEQ) $("#dscSub").textContent = msg; });
+    if(seq !== DSC_LOAD_SEQ) return;                      /* 그 사이 다른 카테고리로 바뀜 */
+    DISCOVERED = found;
     DISCOVERED.forEach(e => e.stats = previewStats(e));
     applyDscSort();
     renderDiscovery();
     $("#dscSub").textContent = `${DISCOVER_REGIONS[DSC_REGION].label} · ${catLabel(cat)} · 채널 ${DISCOVERED.length}개 · 누적 ${quotaUsed}유닛`;
   }catch(e){
+    if(seq !== DSC_LOAD_SEQ) return;
     $("#dscGrid").innerHTML = `<div class="err" style="grid-column:1/-1;margin:0">${esc(e.message)}</div>`;
     $("#dscSub").textContent = "불러오기 실패";
     $("#dscSelBar").classList.add("hidden");
@@ -1983,10 +2163,25 @@ function init(){
   };
 
   /* 자동 탐색 */
-  $("#dscCat").innerHTML = DISCOVER_CATS
-    .map(([k,v]) => `<option value="${k}">${v}</option>`).join("");
+  loadMyCats();
+  renderCatOptions();
   renderDiscoverChips();
   $("#dscCat").onchange = loadDiscovery;
+  wireCategoryMenus();
+  $("#dscCatRename").onclick = () => {
+    const c = MY_CATS.find(x => x.id === DSC_MY);
+    if(!c) return;
+    const name = prompt("새 카테고리 이름", c.name);
+    if(name == null || !name.trim()) return;
+    c.name = name.trim().slice(0,30);
+    catsChanged();
+  };
+  $("#dscCatDelete").onclick = () => {
+    const c = MY_CATS.find(x => x.id === DSC_MY);
+    if(!c || !confirm(`'${c.name}' 카테고리를 삭제할까요? 담아 둔 채널 ${c.channels.length}개 목록이 사라집니다.`)) return;
+    MY_CATS = MY_CATS.filter(x => x !== c);
+    catsChanged();
+  };
   $("#dscSort").innerHTML = DSC_SORTS
     .map(([k,label]) => `<option value="${k}"${k===DSC_SORT?" selected":""}>${label}</option>`).join("");
   $("#dscSort").onchange = () => {          /* 재수집 없이 정렬만 바꿈 */
