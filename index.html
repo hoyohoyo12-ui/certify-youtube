@@ -375,7 +375,11 @@ footer code{background:var(--surface-2);padding:1px 5px;border-radius:4px;font-s
       <button class="ghost sm" id="dscCatRename">✎ 이름 변경</button>
       <button class="ghost sm" id="dscCatDelete">🗑 카테고리 삭제</button>
     </span>
+    <button class="ghost sm" id="dscCatExport" title="내 카테고리 전체를 JSON 파일로 저장합니다 — 다른 기기로 옮기거나 다른 사람에게 줄 때">⬇ 내보내기</button>
+    <button class="ghost sm" id="dscCatImport" title="내보낸 JSON 파일을 불러와 지금 목록에 합칩니다 (기존 카테고리는 지우지 않음)">⬆ 가져오기</button>
+    <input type="file" id="dscCatFile" accept=".json,application/json" class="hidden">
     <button class="ghost sm" id="dscReload">↻ 새로고침</button>
+    <div id="dscCatMsg" class="hidden" style="flex-basis:100%;font-size:12.5px;font-weight:600"></div>
   </div>
   <div id="dscBody"><div class="pv-grid" id="dscGrid"></div></div>
   <div class="selbar hidden" id="dscSelBar">
@@ -1596,6 +1600,7 @@ function saveMyCats(){
   catch{ showErrors(["카테고리를 저장하지 못했습니다. 브라우저 저장공간이 차단되어 있는지 확인하세요."]); }
 }
 const catsOf = chId => MY_CATS.filter(c => c.channels.some(x => x.id === chId));
+const newCatId = () => "c" + Date.now().toString(36) + Math.random().toString(36).slice(2,7);
 
 /* 카드에 띄울 값만 저장 — 다시 볼 때 API를 부르지 않아도 되게 */
 function channelSnapshot(r){
@@ -1643,6 +1648,7 @@ function renderCatOptions(){
     + (MY_CATS.length ? `<optgroup label="⭐ 내 카테고리">${MY_CATS.map(c =>
         `<option value="my:${esc(c.id)}">⭐ ${esc(c.name)} (${c.channels.length})</option>`).join("")}</optgroup>` : "");
   sel.value = [...sel.options].some(o => o.value === cur) ? cur : "";
+  $("#dscCatExport").disabled = !MY_CATS.length;
 }
 /* 카테고리가 바뀐 뒤 드롭다운·메뉴·탐색 화면을 한 번에 맞춤 */
 function catsChanged(){
@@ -1666,7 +1672,7 @@ function createCat(name, chId){
   name = (name || "").trim().slice(0,30);
   if(!name) return;
   let c = MY_CATS.find(x => x.name === name);          /* 같은 이름이면 새로 만들지 않고 거기에 추가 */
-  if(!c){ c = {id:"c" + Date.now().toString(36), name, channels:[]}; MY_CATS.push(c); }
+  if(!c){ c = {id:newCatId(), name, channels:[]}; MY_CATS.push(c); }
   const r = RESULTS.find(x => x.id === chId);
   if(r && !c.channels.some(x => x.id === chId)) c.channels.push(channelSnapshot(r));
   catsChanged();
@@ -1697,6 +1703,82 @@ function syncDscMode(){
   $("#dscCatTools").classList.toggle("hidden", !my);
   const opt = $("#dscSort").querySelector('option[value="trend"]');
   if(opt) opt.textContent = my ? "영상 조회수순 (중앙값)" : "인기 영상 조회수순";
+}
+
+/* ── 내 카테고리 내보내기/가져오기 (JSON 파일) ── */
+const CAT_FILE_TYPE = "certify-youtube/my-categories";
+let catMsgTimer;
+function catMsg(text, bad){
+  const el = $("#dscCatMsg");
+  el.textContent = text;
+  el.style.color = bad ? "var(--critical)" : "var(--good-text)";
+  el.classList.remove("hidden");
+  clearTimeout(catMsgTimer);
+  catMsgTimer = setTimeout(() => el.classList.add("hidden"), 7000);
+}
+
+function exportMyCats(){
+  if(!MY_CATS.length) return;
+  const data = {type:CAT_FILE_TYPE, version:1, exportedAt:new Date().toISOString(), categories:MY_CATS};
+  const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], {type:"application/json"}));
+  const d = new Date(), p2 = n => String(n).padStart(2,"0");
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `youtube-categories-${d.getFullYear()}${p2(d.getMonth()+1)}${p2(d.getDate())}.json`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  const n = MY_CATS.reduce((a,c) => a + c.channels.length, 0);
+  catMsg(`카테고리 ${MY_CATS.length}개 · 채널 ${n}개를 파일로 저장했습니다.`);
+}
+
+/* 파일에서 온 값은 믿지 않고 화면에 쓰는 필드만 형식을 맞춰 다시 만든다 */
+function cleanSnapshot(x){
+  if(!x || typeof x !== "object" || typeof x.id !== "string" || !/^UC[\w-]{10,40}$/.test(x.id)) return null;
+  const str = (v, n=200) => typeof v === "string" ? v.slice(0, n) : "";
+  const num = v => (typeof v === "number" && isFinite(v)) ? v : null;
+  const thumb = str(x.thumb, 500);
+  return {
+    id:x.id, title:str(x.title) || x.id, handle:str(x.handle, 100),
+    thumb: /^https:\/\//i.test(thumb) ? thumb : "",
+    subs:num(x.subs), medViews:num(x.medViews) ?? 0, engagement:num(x.engagement) ?? 0,
+    wonLow:num(x.wonLow) ?? 0, wonHigh:num(x.wonHigh) ?? 0, rpmLabel:str(x.rpmLabel, 60),
+    score: clamp(Math.round(num(x.score) ?? 0), 0, 100),
+    gradeLvl: ["good","warning","serious","critical"].includes(x.gradeLvl) ? x.gradeLvl : "neutral",
+    gradeLabel: str(x.gradeLabel, 20) || "—",
+    ypp: ["ok","near","no"].includes(x.ypp) ? x.ypp : "no",
+    demo: x.demo === true || x.id.startsWith("UCdemo"),
+    savedAt: num(x.savedAt) ?? Date.now()
+  };
+}
+
+/* 기존 목록에 합침 — 같은 이름 카테고리는 채널을 합치고, 같은 채널은 더 최근 분석값을 남긴다 */
+async function importMyCats(file){
+  if(!file) return;
+  if(file.size > 2e6) return catMsg("파일이 너무 큽니다 (2MB 초과).", true);
+  let data;
+  try{ data = JSON.parse(await file.text()); }catch{ return catMsg("JSON 파일을 읽을 수 없습니다.", true); }
+  const list = Array.isArray(data) ? data : (data?.type === CAT_FILE_TYPE ? data.categories : null);
+  if(!Array.isArray(list)) return catMsg("이 사이트에서 내보낸 카테고리 파일이 아닙니다.", true);
+
+  let added = 0, merged = 0, chAdded = 0, chUpdated = 0;
+  for(const raw of list.slice(0, 100)){
+    const name = typeof raw?.name === "string" ? raw.name.trim().slice(0, 30) : "";
+    if(!name || !Array.isArray(raw.channels)) continue;
+    let c = MY_CATS.find(x => x.name === name);
+    if(c) merged++;
+    else { c = {id:newCatId(), name, channels:[]}; MY_CATS.push(c); added++; }
+    for(const x of raw.channels.slice(0, 500)){
+      const snap = cleanSnapshot(x);
+      if(!snap) continue;
+      const i = c.channels.findIndex(y => y.id === snap.id);
+      if(i < 0){ c.channels.push(snap); chAdded++; }
+      else if(snap.savedAt > (c.channels[i].savedAt || 0)){ c.channels[i] = snap; chUpdated++; }
+    }
+  }
+  if(!added && !merged) return catMsg("파일에 가져올 카테고리가 없습니다.", true);
+  catsChanged();
+  catMsg(`가져오기 완료 — 새 카테고리 ${added}개, 합친 카테고리 ${merged}개 · 채널 ${chAdded}개 추가`
+    + (chUpdated ? `, ${chUpdated}개는 더 최근 분석값으로 갱신` : ""));
 }
 
 function wireCategoryMenus(){
@@ -2181,6 +2263,12 @@ function init(){
     if(!c || !confirm(`'${c.name}' 카테고리를 삭제할까요? 담아 둔 채널 ${c.channels.length}개 목록이 사라집니다.`)) return;
     MY_CATS = MY_CATS.filter(x => x !== c);
     catsChanged();
+  };
+  $("#dscCatExport").onclick = exportMyCats;
+  $("#dscCatImport").onclick = () => $("#dscCatFile").click();
+  $("#dscCatFile").onchange = async ev => {
+    await importMyCats(ev.target.files[0]);
+    ev.target.value = "";                      /* 같은 파일을 다시 골라도 동작하게 */
   };
   $("#dscSort").innerHTML = DSC_SORTS
     .map(([k,label]) => `<option value="${k}"${k===DSC_SORT?" selected":""}>${label}</option>`).join("");
