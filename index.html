@@ -251,6 +251,8 @@ tbody tr:last-child td{border-bottom:none}
 
 .toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:12px 20px;border-bottom:1px solid var(--border)}
 .chips{display:flex;gap:6px;flex-wrap:wrap}
+.hist-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:16px;padding-top:14px;border-top:1px solid var(--border)}
+.hist-row select{flex:1;min-width:200px;width:auto;font-size:13px;padding:6px 9px}
 .chip{font-size:12px;padding:4px 10px;border-radius:999px;border:1px solid var(--border-strong);
   background:transparent;color:var(--text-secondary);cursor:pointer;font-weight:600}
 .chip[aria-pressed="true"]{background:var(--text-primary);color:var(--plane);border-color:var(--text-primary)}
@@ -424,6 +426,14 @@ footer code{background:var(--surface-2);padding:1px 5px;border-radius:4px;font-s
       <span class="muted" id="progressTxt" style="font-size:12.5px"></span>
     </div>
     <div class="bar-loading" id="progressBar" style="margin-top:10px"></div>
+
+    <div class="hist-row" id="histRow">
+      <label class="fld" for="histSel" style="margin:0">📂 지난 분석 기록</label>
+      <select id="histSel"></select>
+      <button class="ghost sm" id="histLoad">다시 보기</button>
+      <button class="ghost sm" id="histDel">기록 삭제</button>
+    </div>
+    <div class="hint" id="histHint">분석을 마치면 결과가 이 브라우저에 자동 저장됩니다. 다시 볼 때는 API 할당량을 쓰지 않습니다.</div>
   </div>
 </div>
 
@@ -469,6 +479,8 @@ const LS_KEY_CLAUDE = "yt_certify_claude_key";
 const LS_KEY_CLAUDE_MODEL = "yt_certify_claude_model";
 const LS_THEME = "yt_certify_theme";
 const LS_MY_CATS = "yt_certify_my_cats";
+const LS_HISTORY = "yt_certify_history";
+const LS_AI_HOOKS = "yt_certify_ai_hooks";
 
 /* 카테고리별 롱폼 RPM(USD, 1000 조회당 실수령 기준 업계 통용 범위) */
 const RPM = {
@@ -767,6 +779,13 @@ function wireVideoAI(){
     const v = r?.vids.find(x => x.id === targetId);
     if(!r || !v) return;
 
+    const cached = AI_HOOK.get(targetId);
+    if(cached && cached.status === "done" && !retryBtn){      /* 저장된 결과는 키 없이도 다시 볼 수 있음 */
+      panel.classList.remove("hidden");
+      panel.querySelector(".ai-panel").innerHTML = aiHookPanelHTML(cached);
+      return;
+    }
+
     if(!CLAUDE_KEY){
       showErrors(["AI 훅 분석을 쓰려면 먼저 상단 'AI 훅 분석 설정'에 Anthropic API 키를 저장하세요."]);
       $("#claudeKeyBox").open = true;
@@ -779,18 +798,13 @@ function wireVideoAI(){
     panel.classList.remove("hidden");
     const box = panel.querySelector(".ai-panel");
 
-    const cached = AI_HOOK.get(targetId);
-    if(cached && cached.status === "done" && !retryBtn){
-      box.innerHTML = aiHookPanelHTML(cached);
-      return;
-    }
-
     AI_HOOK.set(targetId, {status:"loading"});
     box.innerHTML = aiHookPanelHTML({status:"loading"});
     try{
       const data = await analyzeHook(r, v);
       const state = {status:"done", data};
       AI_HOOK.set(targetId, state);
+      saveAIHooks();
       box.innerHTML = aiHookPanelHTML(state);
     }catch(e){
       const state = {status:"error", error:e.message};
@@ -1028,7 +1042,7 @@ function pickBucket(ch, vids){
 }
 
 function analyze(ch, rawVids, opt){
-  const now = Date.now();
+  const now = opt.asOf || Date.now();     /* 기록에서 다시 볼 때는 분석했던 시점 기준으로 계산 */
   const stats = ch.statistics || {};
   const subs = stats.hiddenSubscriberCount ? null : +stats.subscriberCount;
   const totalViews = +stats.viewCount || 0;
@@ -1195,7 +1209,7 @@ function analyze(ch, rawVids, opt){
               :               {label:"위험",      lvl:"critical"};
 
   return {
-    ch, vids, longs, shorts,
+    ch, vids, longs, shorts, asOf: now,
     id: ch.id,
     title: ch.snippet?.title || "(이름 없음)",
     handle: ch.snippet?.customUrl || "",
@@ -1610,7 +1624,7 @@ function channelSnapshot(r){
     wonLow:r.rev.wonLow, wonHigh:r.rev.wonHigh, rpmLabel:r.rev.rpmLabel,
     score:r.score, gradeLvl:r.grade.lvl, gradeLabel:r.grade.label,
     ypp: r.ypp.eligible ? "ok" : r.ypp.near ? "near" : "no",
-    demo: r.id.startsWith("UCdemo"), savedAt: Date.now()
+    demo: r.id.startsWith("UCdemo"), savedAt: r.asOf || Date.now()
   };
 }
 /* 저장해 둔 채널을 다시 분석하면 최신 결과로 갱신 */
@@ -1618,7 +1632,7 @@ function refreshSavedSnapshots(){
   let changed = false;
   for(const r of RESULTS) for(const c of MY_CATS){
     const i = c.channels.findIndex(x => x.id === r.id);
-    if(i >= 0){ c.channels[i] = channelSnapshot(r); changed = true; }
+    if(i >= 0 && (r.asOf || 0) >= (c.channels[i].savedAt || 0)){ c.channels[i] = channelSnapshot(r); changed = true; }
   }
   if(!changed) return;
   saveMyCats();
@@ -1933,6 +1947,115 @@ function analyzeIds(ids){
   run(ids.slice(0,20));
 }
 
+/* ── 지난 분석 기록: 직접 입력 분석 결과를 원본째 저장 → 다시 볼 때 API 없이 재계산 ── */
+const HIST_MAX = 15;
+let HISTORY = [];          /* [{id, at, inputs:[], opt:{count,country,ratio}, items:[{ch, v:[]}]}] 최신순 */
+
+function loadHistory(){
+  try{ HISTORY = JSON.parse(localStorage.getItem(LS_HISTORY) || "[]"); }catch{ HISTORY = []; }
+  if(!Array.isArray(HISTORY)) HISTORY = [];
+}
+/* 저장공간(보통 5MB)이 모자라면 오래된 기록부터 지운다 */
+function saveHistory(){
+  while(true){
+    try{ localStorage.setItem(LS_HISTORY, JSON.stringify(HISTORY)); return true; }
+    catch{
+      if(HISTORY.length <= 1){ HISTORY = []; try{ localStorage.removeItem(LS_HISTORY); }catch{} return false; }
+      HISTORY.pop();
+    }
+  }
+}
+/* 재계산에 필요한 값만 남겨 용량을 줄인다 */
+function compactChannel(ch){
+  const sn = ch.snippet || {};
+  return {
+    id: ch.id,
+    snippet:{ title:sn.title, customUrl:sn.customUrl, description:(sn.description || "").slice(0,500),
+              publishedAt:sn.publishedAt, country:sn.country,
+              thumbnails:{default:{url:sn.thumbnails?.default?.url || ""}} },
+    statistics: ch.statistics || {},
+    topicDetails: ch.topicDetails ? {topicCategories:ch.topicDetails.topicCategories || []} : undefined,
+    status: {madeForKids: ch.status?.madeForKids === true}
+  };
+}
+function compactVideo(v){
+  return {
+    id:v.id, title:v.title, published:v.published, categoryId:v.categoryId, thumb:v.thumb,
+    desc:(v.desc || "").slice(0,400), tags:(v.tags || []).slice(0,15),
+    views:v.views, likes:v.likes, comments:v.comments,
+    likesHidden:v.likesHidden, commentsOff:v.commentsOff, dur:v.dur
+  };
+}
+function addHistory(inputs, opt){
+  if(!RESULTS.length) return;
+  HISTORY.unshift({
+    id: newCatId(), at: RESULTS[0].asOf || Date.now(), inputs: inputs.slice(0,20),
+    opt: {count:opt.count, country:opt.country, ratio:opt.ratio},
+    items: RESULTS.map(r => ({ch:compactChannel(r.ch), v:r.vids.map(compactVideo)}))
+  });
+  HISTORY = HISTORY.slice(0, HIST_MAX);
+  const ok = saveHistory();
+  renderHistoryOptions(ok ? HISTORY[0].id : "");
+  if(!ok) showErrors(["분석 기록을 저장하지 못했습니다. 브라우저 저장공간이 부족하거나 차단되어 있습니다."]);
+}
+function fmtDateTime(t){
+  const d = new Date(t), p2 = n => String(n).padStart(2,"0");
+  return `${d.getFullYear()}.${p2(d.getMonth()+1)}.${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}`;
+}
+function historyLabel(h){
+  const names = h.items.map(it => it.ch.snippet?.title || it.ch.id);
+  return `${fmtDateTime(h.at)} · ${names[0]}${names.length > 1 ? ` 외 ${names.length-1}개` : ""}`;
+}
+function renderHistoryOptions(selId){
+  const sel = $("#histSel");
+  sel.innerHTML = HISTORY.length
+    ? HISTORY.map(h => `<option value="${esc(h.id)}" title="${esc(h.items.map(it => it.ch.snippet?.title || it.ch.id).join(", "))}">${esc(historyLabel(h))}</option>`).join("")
+    : `<option value="">아직 저장된 분석 기록이 없습니다</option>`;
+  if(selId && HISTORY.some(h => h.id === selId)) sel.value = selId;
+  sel.disabled = $("#histLoad").disabled = $("#histDel").disabled = !HISTORY.length;
+  $("#histHint").textContent = `분석을 마치면 결과가 이 브라우저에 자동 저장됩니다. 다시 볼 때는 API 할당량을 쓰지 않습니다 (최근 ${HIST_MAX}개까지 · 저장 ${HISTORY.length}개).`;
+}
+function openHistory(id){
+  const h = HISTORY.find(x => x.id === id);
+  if(!h) return;
+  /* 분석 당시 옵션으로 화면을 되돌림 — 이후 옵션을 바꾸면 저장된 원본으로 재계산 */
+  if([...$("#optCount").options].some(o => +o.value === h.opt.count)) $("#optCount").value = String(h.opt.count);
+  if(COUNTRIES[h.opt.country]) $("#optCountry").value = h.opt.country;
+  const ratio = clamp(Math.round((h.opt.ratio || 0.4) * 100), 15, 70);
+  $("#optRatio").value = ratio; $("#ratioVal").textContent = ratio + "%";
+  $("#input").value = (h.inputs || []).join("\n");
+
+  const opt = {count:h.opt.count, country:$("#optCountry").value, ratio:ratio/100, asOf:h.at};
+  RESULTS = h.items.map(it => analyze(it.ch, it.v.map(rebuildRaw), opt));
+  showErrors([`📂 <b>${esc(fmtDateTime(h.at))}</b>에 분석한 기록입니다 — 저장된 값으로 다시 보여 주며 API를 호출하지 않습니다. 최신 수치가 필요하면 <b>분석 시작</b>을 누르세요.`]);
+  renderCompare();
+  renderDetails();
+  $("#csv").disabled = false;
+  setProgress(1, `기록 불러옴 · ${RESULTS.length}개 채널`);
+  $("#cmpCard").scrollIntoView({behavior:"smooth", block:"start"});
+}
+function deleteHistory(id){
+  const h = HISTORY.find(x => x.id === id);
+  if(!h || !confirm(`'${historyLabel(h)}' 기록을 삭제할까요?`)) return;
+  HISTORY = HISTORY.filter(x => x !== h);
+  saveHistory();
+  renderHistoryOptions();
+}
+
+/* AI 훅 분석 결과도 저장 — 같은 영상을 다시 열 때 재과금되지 않게 */
+const AI_HOOK_MAX = 300;
+function loadAIHooks(){
+  let saved;
+  try{ saved = JSON.parse(localStorage.getItem(LS_AI_HOOKS) || "{}"); }catch{ saved = {}; }
+  if(!saved || typeof saved !== "object") return;
+  for(const [vid, data] of Object.entries(saved))
+    if(data && typeof data.summary === "string") AI_HOOK.set(vid, {status:"done", data});
+}
+function saveAIHooks(){
+  const done = [...AI_HOOK].filter(([,st]) => st.status === "done").slice(-AI_HOOK_MAX);
+  try{ localStorage.setItem(LS_AI_HOOKS, JSON.stringify(Object.fromEntries(done.map(([k,st]) => [k, st.data])))); }catch{}
+}
+
 /* ═══════════════════════════════════════════════════════════
    4. 실행 흐름
    ═══════════════════════════════════════════════════════════ */
@@ -2005,6 +2128,7 @@ async function run(presetIds){
     renderCompare();
     renderDetails();
     $("#csv").disabled = false;
+    addHistory(presetIds?.length ? presetIds : raw, opt);
   }catch(e){
     showErrors([esc(e.message)]);
     setProgress(1, "");
@@ -2244,6 +2368,13 @@ function init(){
     CLAUDE_KEY = ""; $("#claudeKey").value = ""; localStorage.removeItem(LS_KEY_CLAUDE); setClaudeKeyState();
   };
 
+  /* 지난 분석 기록 · 저장된 AI 훅 분석 */
+  loadHistory();
+  renderHistoryOptions();
+  loadAIHooks();
+  $("#histLoad").onclick = () => openHistory($("#histSel").value);
+  $("#histDel").onclick = () => deleteHistory($("#histSel").value);
+
   /* 자동 탐색 */
   loadMyCats();
   renderCatOptions();
@@ -2294,7 +2425,7 @@ function init(){
     recalcTimer = setTimeout(() => {
       if(!RESULTS.length) return;
       const opt = {ratio:+$("#optRatio").value/100, country:$("#optCountry").value};
-      RESULTS = RESULTS.map(r => analyze(r.ch, r.vids.map(rebuildRaw), opt));
+      RESULTS = RESULTS.map(r => analyze(r.ch, r.vids.map(rebuildRaw), {...opt, asOf:r.asOf}));
       renderCompare(); renderDetails();
     }, 180);
   };
@@ -2319,7 +2450,9 @@ function rebuildRaw(v){
   return {
     id: v.id,
     snippet:{ title:v.title, publishedAt:new Date(v.published).toISOString(),
-              categoryId:v.categoryId, liveBroadcastContent:"none" },
+              categoryId:v.categoryId, liveBroadcastContent:"none",
+              description:v.desc || "", tags:v.tags || [],
+              thumbnails: v.thumb ? {medium:{url:v.thumb}} : {} },
     statistics: st,
     contentDetails:{ duration:`PT${Math.floor(v.dur/3600)}H${Math.floor(v.dur%3600/60)}M${v.dur%60}S` },
     status:{}
